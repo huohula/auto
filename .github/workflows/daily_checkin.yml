@@ -4,8 +4,7 @@ on:
   # 每天北京时间 0:02 和 7:00 运行
   schedule:
     - cron: '*/5 * * * *'   # 北京时间 0:02
-    - cron: '0 7 * * *'   # 北京时间 7:00
-    timezone: Asia/Shanghai
+    - cron: '0 23 * * *'   # 北京时间 7:00
   workflow_dispatch:
 
 jobs:
