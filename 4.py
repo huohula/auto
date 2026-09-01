@@ -8,7 +8,7 @@ LINK_LIST = [
      "http://mall.tellhowdm.cn/activity/act67/open/home?openid=obJT21TdFBT_uX8ZAKgEBxaipr68&channel=share",
     "http://mall.tellhowdm.cn/activity/act67/open/home?openid=obJT21aOxa_lJMPrq8djUbtF8zxY&channel=share",
     "https://mall.tellhowdm.cn/activity/act67/open/home?terminalId=Uld7lY83AUzNxc69qzzMLA%3D%3D&channel=share",
-    "https://mall.tellhowdm.cn/activity/act67/open/home?terminalId=Uld7lY83AUzNxc69qzzMLA%3D%3D&channel=share",
+    "https://mall.tellhowdm.cn/activity/act67/open/home?terminalId=DD3amwP0iKtdsYM3ogVcag%3D%3D&channel=share",
     "https://mall.tellhowdm.cn/activity/act67/open/home?terminalId=9WqaO4BKBzLUXDK4y%2BqprQ%3D%3D&channel=share",
     "https://mall.tellhowdm.cn/activity/act67/open/home?terminalId=o8i7fm%2BnOLFdsYM3ogVcag%3D%3D&channel=share",
 
