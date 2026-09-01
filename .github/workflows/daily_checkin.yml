@@ -1,10 +1,8 @@
 name: 每日自动签到
 
 on:
-  # 设置定时任务，每天北京时间早上 8:00 运行 (UTC 时间 00:00)
   schedule:
     - cron: '0 21 * * *'
-  # 允许手动触发，方便调试
   workflow_dispatch:
 
 jobs:
@@ -15,19 +13,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. 设置 Python 环境
+      # 2. 设置 Python 环境 (去掉了 cache 避免报错)
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-          cache: 'pip' # 启用 pip 缓存，加速依赖安装
+          python-version: '3.10'
 
-      # 3. 安装依赖
+      # 3. 安装依赖 (直接在这里指定安装 requests)
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install requests
 
-      # 4. 运行 Python 脚本
+      # 4. 运行脚本
       - name: Run the check-in script
         run: python 4.py
