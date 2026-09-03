@@ -3,8 +3,8 @@ name: 每日自动签到
 on:
   # 每天北京时间 0:02 和 7:00 运行
   schedule:
-    - cron: '0 */5 * * *'   # 北京时间 0:02
-    - cron: '0 23 * * *'   # 北京时间 7:00
+    - cron: '0 */5 * * *'   # 每5小时运行（UTC 16:02）
+    - cron: '0 23 * * *'   # 北京时间 7:00（UTC 23:00）
   workflow_dispatch:
 
 jobs:
@@ -12,10 +12,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.10'
 
