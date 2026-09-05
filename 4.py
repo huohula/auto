@@ -1,11 +1,13 @@
 import requests
 import time
 import json
+import webbrowser
+import subprocess
 from urllib.parse import urlparse, parse_qs
 
 # ===== 用户配置：填入你的签到链接列表（可混用两种格式） =====
 LINK_LIST = [
-     "http://mall.tellhowdm.cn/activity/act67/open/home?openid=obJT21TdFBT_uX8ZAKgEBxaipr68&channel=share",
+    "http://mall.tellhowdm.cn/activity/act67/open/home?openid=obJT21TdFBT_uX8ZAKgEBxaipr68&channel=share",
     "http://mall.tellhowdm.cn/activity/act67/open/home?openid=obJT21aOxa_lJMPrq8djUbtF8zxY&channel=share",
     "https://mall.tellhowdm.cn/activity/act67/open/home?terminalId=Uld7lY83AUzNxc69qzzMLA%3D%3D&channel=share",
     "https://mall.tellhowdm.cn/activity/act67/open/home?terminalId=DD3amwP0iKtdsYM3ogVcag%3D%3D&channel=share",
@@ -15,6 +17,8 @@ LINK_LIST = [
 ]
 BASE = "https://mall.tellhowdm.cn"
 INTERVAL = 2
+
+
 # =============================================================
 
 def parse_identifier(url):
@@ -28,6 +32,7 @@ def parse_identifier(url):
     is_openid = openid is not None
     return user_id, channel, is_openid
 
+
 def get_jsessionid(base_url, user_id, channel):
     """访问主页获取 JSESSIONID"""
     session = requests.Session()
@@ -40,6 +45,7 @@ def get_jsessionid(base_url, user_id, channel):
                        timeout=10)
     jsessionid = session.cookies.get("JSESSIONID")
     return session, jsessionid
+
 
 def query_init(base_url, user_id, channel, is_openid, jsessionid):
     """查询签到状态（init 接口）"""
@@ -60,6 +66,7 @@ def query_init(base_url, user_id, channel, is_openid, jsessionid):
     resp = requests.get(url, params=params, headers=headers, timeout=10)
     return resp
 
+
 def do_sign(base_url, user_id, channel, is_openid, jsessionid):
     """执行签到"""
     url = f"{base_url}/activity/newYear20/signed"
@@ -78,6 +85,7 @@ def do_sign(base_url, user_id, channel, is_openid, jsessionid):
     }
     resp = requests.get(url, params=params, headers=headers, timeout=10)
     return resp
+
 
 def query_vip_info(base_url, user_id, channel, is_openid, jsessionid):
     """查询VIP信息（获取手机号等）"""
@@ -98,8 +106,9 @@ def query_vip_info(base_url, user_id, channel, is_openid, jsessionid):
     resp = requests.get(url, params=params, headers=headers, timeout=10)
     return resp
 
+
 def process_one(url, index, total):
-    print(f"\n🔹 处理第 {index+1}/{total} 个链接")
+    print(f"\n🔹 处理第 {index + 1}/{total} 个链接")
     print(f"🔗 {url}")
 
     user_id, channel, is_openid = parse_identifier(url)
@@ -124,9 +133,6 @@ def process_one(url, index, total):
 
     try:
         init_data = resp_init.json()
-        # 假设返回格式为 {"statusCode":0, "data":{"signed":"0/1", "luckCount":xxx, "weekNum":xxx}}
-        # 但可能是 {"statusCode":0, "data":{...}} 或 {"code":0, "data":{...}}
-        # 我们从你的示例看，签到接口返回的statusCode，但init可能类似，先通用处理
         status = init_data.get('statusCode')
         if status is None:
             status = init_data.get('code')
@@ -145,10 +151,8 @@ def process_one(url, index, total):
     # 2. 判断签到状态
     if str(signed) == "1":
         print(f"✅ 今日已签到  \n连续签到: {week_num}天  当前金币: {luck_count}")
-        # 已签到，直接查询VIP信息
     else:
         print(f"ℹ️ 今日未签到，即将执行签到...")
-        # 执行签到
         resp_sign = do_sign(BASE, user_id, channel, is_openid, jsessionid)
         print(f"📡 签到响应码: {resp_sign.status_code}")
         try:
@@ -157,11 +161,9 @@ def process_one(url, index, total):
                 d = sign_data.get('data', {})
                 print(f"✅ 签到成功")
                 print(f"   连续签到: {d.get('weekNum', 0)} 天  当前金币: {d.get('luckCount', 0)}")
-                # 更新金币（签到后可能会变）
                 luck_count = d.get('luckCount', luck_count)
             else:
                 print(f"⚠️ 签到失败: {sign_data.get('statusDesc', '未知错误')}")
-                # 即使签到失败，也继续查询VIP信息，但保留原有金币
         except Exception as e:
             print(f"⚠️ 解析签到响应失败: {e}")
             print(f"   响应原文: {resp_sign.text[:200]}")
@@ -174,7 +176,6 @@ def process_one(url, index, total):
         vip_data = resp_vip.json()
         if vip_data.get('retCode') == "0":
             phone = vip_data.get('phone', '未获取')
-            # 也可获取id等
             print(f"📱 手机号: {phone}")
         else:
             print(f"⚠️ VIP信息查询失败: {vip_data.get('msg', '未知错误')}")
@@ -186,13 +187,50 @@ def process_one(url, index, total):
     status_text = "已签到" if str(signed) == "1" else "未签到"
     print(f"\n📊 最终结果：手机号 {phone}  金币 {luck_count}  签到状态 {status_text}")
 
+
+def detect_and_close_browser():
+    """自动检测当前运行的浏览器并关闭"""
+    browser_names = ['chrome', 'msedge', 'firefox', 'opera', 'brave', 'vivaldi']
+    try:
+        result = subprocess.run(['tasklist'], capture_output=True, text=True, encoding='gbk')
+        task_output = result.stdout.lower()
+        closed = []
+        for browser in browser_names:
+            if f"{browser}.exe" in task_output:
+                subprocess.run(['taskkill', '/f', '/im', f'{browser}.exe'],
+                               capture_output=True)
+                closed.append(browser)
+        return closed
+    except Exception as e:
+        print(f"⚠️ 检测浏览器失败: {e}")
+        return []
+
+
 def main():
     total = len(LINK_LIST)
     if total == 0:
         print("⚠️ 链接列表为空，请添加链接")
         return
 
-    print(f"📋 共 {total} 个链接，间隔 {INTERVAL} 秒")
+    # 1. 先用浏览器打开所有链接
+    print(f"🌐 正在使用默认浏览器打开 {total} 个链接...")
+    for url in LINK_LIST:
+        webbrowser.open(url)
+
+    # 2. 等待10秒
+    print("⏳ 等待10秒，请检查浏览器页面...")
+    time.sleep(10)
+
+    # 3. 自动检测并关闭浏览器
+    print("🧹 正在自动检测并关闭浏览器...")
+    closed = detect_and_close_browser()
+    if closed:
+        print(f"✅ 已关闭: {', '.join(closed)}")
+    else:
+        print("⚠️ 未检测到运行中的浏览器")
+
+    # 4. 开始执行签到逻辑
+    print(f"\n📋 开始执行签到脚本，共 {total} 个链接，间隔 {INTERVAL} 秒")
     for i, url in enumerate(LINK_LIST):
         process_one(url, i, total)
         if i < total - 1:
@@ -200,6 +238,7 @@ def main():
             time.sleep(INTERVAL)
 
     print("\n🎉 全部处理完成！")
+
 
 if __name__ == "__main__":
     main()
