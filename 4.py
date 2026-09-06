@@ -1,27 +1,18 @@
 import requests
 import time
 import json
+import os
 from urllib.parse import urlparse, parse_qs
-import os  # 导入 os 模块
-from dotenv import load_dotenv  # 导入 dotenv 模块
 
-# --- 加载环境变量 ---
-# 这行代码会读取当前目录下的 .env 文件，并将其中的变量加载到环境变量中
-load_dotenv()
-
-# ===== 用户配置：从环境变量中读取 =====
-# 1. 读取 LINK_LIST 字符串
-link_list_str = os.getenv('LINK_LIST')
-
-# 2. 将字符串按行分割，并过滤掉空行，生成列表
-# os.getenv 的第二个参数是默认值，如果环境变量不存在，则返回一个空列表
-LINK_LIST = link_list_str.splitlines() if link_list_str else []
+# ===== 从 GitHub Secrets 读取链接列表 =====
+link_list_str = os.environ.get("LINK_LIST", "")
+LINK_LIST = [line.strip() for line in link_list_str.splitlines() if line.strip()]
+# ============================================
 
 BASE = "https://mall.tellhowdm.cn"
 INTERVAL = 2
-# =====================================
 
-# ... (其余代码保持不变) ...
+# =============================================================
 
 def parse_identifier(url):
     """从链接中提取 openid 或 terminalId，以及 channel"""
@@ -34,8 +25,6 @@ def parse_identifier(url):
     is_openid = openid is not None
     return user_id, channel, is_openid
 
-# ... (其余函数 get_jsessionid, query_init, do_sign, query_vip_info 保持不变) ...
-
 def get_jsessionid(base_url, user_id, channel):
     """访问主页获取 JSESSIONID"""
     session = requests.Session()
@@ -43,28 +32,153 @@ def get_jsessionid(base_url, user_id, channel):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:146.0) Gecko/20100101 Firefox/146.0",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     })
-    # 注意：这里保留了 4.py 的逻辑，即只处理 openid。
-    # 如果你的链接包含 terminalId，请参考上一个回答使用“调整.py”的逻辑。
     resp = session.get(f"{base_url}/activity/act67/open/home",
                        params={"openid": user_id, "channel": channel} if user_id else {"channel": channel},
                        timeout=10)
     jsessionid = session.cookies.get("JSESSIONID")
     return session, jsessionid
 
-# ... (其余函数 process_one, main 保持不变) ...
+def query_init(base_url, user_id, channel, is_openid, jsessionid):
+    """查询签到状态（init 接口）"""
+    url = f"{base_url}/activity/act67/init"
+    params = {"channel": channel}
+    if is_openid:
+        params["openid"] = user_id
+    else:
+        params["terminalId"] = user_id
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:146.0) Gecko/20100101 Firefox/146.0",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Referer": f"{base_url}/activity/act67/open/home?{('openid' if is_openid else 'terminalId')}={user_id}&channel={channel}",
+        "X-Requested-With": "XMLHttpRequest",
+        "Cookie": f"JSESSIONID={jsessionid}"
+    }
+    resp = requests.get(url, params=params, headers=headers, timeout=10)
+    return resp
+
+def do_sign(base_url, user_id, channel, is_openid, jsessionid):
+    """执行签到"""
+    url = f"{base_url}/activity/newYear20/signed"
+    params = {"actId": "67", "channel": channel}
+    if is_openid:
+        params["openid"] = user_id
+    else:
+        params["terminalId"] = user_id
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:146.0) Gecko/20100101 Firefox/146.0",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Referer": f"{base_url}/activity/act67/open/home?{('openid' if is_openid else 'terminalId')}={user_id}&channel={channel}",
+        "X-Requested-With": "XMLHttpRequest",
+        "Cookie": f"JSESSIONID={jsessionid}"
+    }
+    resp = requests.get(url, params=params, headers=headers, timeout=10)
+    return resp
+
+def query_vip_info(base_url, user_id, channel, is_openid, jsessionid):
+    """查询VIP信息（获取手机号等）"""
+    url = f"{base_url}/activity/vip/book2/queryByBossAll"
+    params = {"channel": channel}
+    if is_openid:
+        params["openid"] = user_id
+    else:
+        params["terminalId"] = user_id
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:146.0) Gecko/20100101 Firefox/146.0",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Referer": f"{base_url}/activity/act67/open/home?{('openid' if is_openid else 'terminalId')}={user_id}&channel={channel}",
+        "X-Requested-With": "XMLHttpRequest",
+        "Cookie": f"JSESSIONID={jsessionid}"
+    }
+    resp = requests.get(url, params=params, headers=headers, timeout=10)
+    return resp
 
 def process_one(url, index, total):
     print(f"\n🔹 处理第 {index+1}/{total} 个链接")
-    # 为了安全，打印时隐藏部分链接信息
-    print(f"🔗 {url[:30]}...") 
-    # ...
-    # (process_one 函数内部逻辑不变)
-    # ...
+    print(f"🔗 {url[:50]}...")
+
+    user_id, channel, is_openid = parse_identifier(url)
+    if not user_id:
+        print("❌ 未找到用户标识，跳过")
+        return
+
+    id_type = "openid" if is_openid else "terminalId"
+    print(f"🔑 使用 {id_type}: {user_id}")
+
+    # 获取 JSESSIONID
+    session, jsessionid = get_jsessionid(BASE, user_id, channel)
+    if not jsessionid:
+        print("⚠️ 未能获取 JSESSIONID，尝试使用空值继续...")
+        jsessionid = ""
+
+    print(f"🍪 JSESSIONID: {jsessionid or '未获取'}")
+
+    # 1. 查询签到状态
+    resp_init = query_init(BASE, user_id, channel, is_openid, jsessionid)
+    print(f"📡 状态查询响应码: {resp_init.status_code}")
+
+    try:
+        init_data = resp_init.json()
+        status = init_data.get('statusCode')
+        if status is None:
+            status = init_data.get('code')
+        if status != 0:
+            print(f"⚠️ 查询状态失败: {init_data.get('statusDesc', init_data.get('msg', '未知错误'))}")
+            return
+        data = init_data.get('data', {})
+        signed = data.get('signed', '0')
+        week_num = data.get('weekNum', 0)
+        luck_count = data.get('luckCount', 0)
+    except Exception as e:
+        print(f"⚠️ 解析状态查询响应失败: {e}")
+        print(f"   响应原文: {resp_init.text[:200]}")
+        return
+
+    # 2. 判断签到状态
+    if str(signed) == "1":
+        print(f"✅ 今日已签到  \n连续签到: {week_num}天  当前金币: {luck_count}")
+    else:
+        print(f"ℹ️ 今日未签到，即将执行签到...")
+        resp_sign = do_sign(BASE, user_id, channel, is_openid, jsessionid)
+        print(f"📡 签到响应码: {resp_sign.status_code}")
+        try:
+            sign_data = resp_sign.json()
+            if sign_data.get('statusCode') == 0:
+                d = sign_data.get('data', {})
+                print(f"✅ 签到成功")
+                print(f"   连续签到: {d.get('weekNum', 0)} 天  当前金币: {d.get('luckCount', 0)}")
+                luck_count = d.get('luckCount', luck_count)
+            else:
+                print(f"⚠️ 签到失败: {sign_data.get('statusDesc', '未知错误')}")
+        except Exception as e:
+            print(f"⚠️ 解析签到响应失败: {e}")
+            print(f"   响应原文: {resp_sign.text[:200]}")
+
+    # 3. 查询VIP信息（获取手机号）
+    resp_vip = query_vip_info(BASE, user_id, channel, is_openid, jsessionid)
+    print(f"📡 VIP信息响应码: {resp_vip.status_code}")
+    phone = "未获取"
+    try:
+        vip_data = resp_vip.json()
+        if vip_data.get('retCode') == "0":
+            phone = vip_data.get('phone', '未获取')
+            print(f"📱 手机号: {phone}")
+        else:
+            print(f"⚠️ VIP信息查询失败: {vip_data.get('msg', '未知错误')}")
+    except Exception as e:
+        print(f"⚠️ 解析VIP信息失败: {e}")
+        print(f"   响应原文: {resp_vip.text[:200]}")
+
+    # 4. 最终汇总显示
+    status_text = "已签到" if str(signed) == "1" else "未签到"
+    print(f"\n📊 最终结果：手机号 {phone}  金币 {luck_count}  签到状态 {status_text}")
 
 def main():
     total = len(LINK_LIST)
     if total == 0:
-        print("⚠️ 链接列表为空，请检查 .env 文件中的 LINK_LIST 配置")
+        print("⚠️ 链接列表为空，请检查 GitHub Secrets 中的 LINK_LIST 配置")
         return
 
     print(f"📋 共 {total} 个链接，间隔 {INTERVAL} 秒")
