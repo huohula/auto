@@ -1,24 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-泰豪商城 act67 每日签到脚本（优化版）
-逆向依据：前端 act67.js + commons.js 完整流程
-  主页 -> userInfo -> clubInfo -> init -> signed
-修复点：
-  1. get_jsessionid 参数名 bug（terminalId 被误传为 openid）
-  2. 全程复用同一 session（原脚本只手动传 JSESSIONID）
-  3. 补全前端必调的 userInfo 接口（建立服务端用户会话绑定）
-  4. 签到前校验会员状态（flag1/flag5/flag5_12/flag10/flag25）
-  5. 签到失败自动重试（间隔递增）
-  6. 移除无效的浏览器打开/关闭逻辑
-  7. 完整输出：手机号、会员类型、金币、连续天数、签到状态
+泰豪商城 act67 每日签到脚本（逆向稳定版）
+逆向依据：act67.js + library.js(commons) 完整前端流程
+
+与原脚本的核心差异：
+  1. signed 请求只带 actId + 认证标识(openid/terminalId)，不带 channel
+     （前端 addLoginParmarToUrls 只注入 auth 字段，不注入 channel）
+  2. 不手动加 X-Requested-With（纯 $.getJSON 不带此头）
+  3. 签到前检测活动状态，活动已结束时直接提示
+  4. 失败时输出完整响应头+响应体，便于定位服务端问题
+  5. 指数退避重试，避免加剧服务端限流
+  6. 支持单次诊断模式（--diag），输出完整请求/响应细节
+
+当前已知问题：
+  活动页面标注活动时间为 2020年1月12日至3月18日。
+  signed 接口当前对所有请求（含不带用户标识的请求）统一返回：
+    {"statusCode":1,"statusDesc":"请稍后再试~","data":{}}
+  这表明是服务端层面的拒绝（活动关闭/下游异常/IP风控），而非请求格式问题。
+  建议先在微信/和我信APP内手动签到验证服务端是否正常。
 """
 
 import requests
 import time
-import json
 import sys
-from urllib.parse import urlparse, parse_qs
+import argparse
+from urllib.parse import urlparse, parse_qs, quote
 
 # ===== 用户配置 =====
 LINK_LIST = [
@@ -30,14 +37,18 @@ LINK_LIST = [
     "https://mall.tellhowdm.cn/activity/act67/open/home?terminalId=o8i7fm%2BnOLFdsYM3ogVcag%3D%3D&channel=share",
 ]
 BASE = "https://mall.tellhowdm.cn"
-INTERVAL = 3          # 账号间间隔（秒），避免服务端限流
+ACT_ID = "67"
+INTERVAL = 5          # 账号间间隔（秒）
 SIGN_RETRY = 2        # 签到失败重试次数
-RETRY_DELAY = 3       # 重试间隔（秒）
-TIMEOUT = 15
+TIMEOUT = 20
 # ====================
 
-UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:146.0) "
-      "Gecko/20100101 Firefox/146.0")
+# 微信内 UA（最接近真实环境）
+UA = ("Mozilla/5.0 (Linux; Android 10; MI 9 Build/QKQ1.190825.002; wv) "
+      "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 "
+      "Chrome/91.0.4472.120 Mobile Safari/537.36 "
+      "MicroMessenger/8.0.40.2420(0x28002837) WeChat/arm64 Weixin "
+      "NetType/WIFI Language/zh_CN ABI/arm64")
 
 VIP_FLAGS = {
     "flag1": "次元君会员",
@@ -49,80 +60,93 @@ VIP_FLAGS = {
 
 
 def parse_identifier(url):
+    """从分享链接提取用户标识，保持原始 URL 编码（不解码）"""
     parsed = urlparse(url)
-    params = parse_qs(parsed.query)
-    openid = params.get("openid", [None])[0]
-    terminal_id = params.get("terminalId", [None])[0]
-    channel = params.get("channel", ["share"])[0]
+    # 用原始 query 字符串提取，避免 parse_qs 自动解码
+    raw_query = parsed.query
+    openid = None
+    terminal_id = None
+    channel = "share"
+    for pair in raw_query.split("&"):
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            if k == "openid":
+                openid = v
+            elif k == "terminalId":
+                terminal_id = v
+            elif k == "channel":
+                channel = v
     if openid:
         return openid, channel, True
     return terminal_id, channel, False
 
 
-def build_headers(uid, channel, is_openid, ajax=False):
-    h = {
-        "User-Agent": UA,
-        "Accept": ("application/json, text/javascript, */*; q=0.01"
-                   if ajax else
-                   "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
-    }
-    if ajax:
-        id_key = "openid" if is_openid else "terminalId"
-        h["X-Requested-With"] = "XMLHttpRequest"
-        h["Referer"] = (f"{BASE}/activity/act67/open/home?"
-                        f"{id_key}={uid}&channel={channel}")
-    return h
+def build_referer(uid, channel, is_openid):
+    id_key = "openid" if is_openid else "terminalId"
+    return f"{BASE}/activity/act67/open/home?{id_key}={uid}&channel={channel}"
 
 
-def create_session(uid, channel, is_openid):
-    """访问主页建立会话，使用正确的参数名"""
+def create_session(uid, channel, is_openid, diag=False):
+    """访问主页建立会话，获取 JSESSIONID"""
     s = requests.Session()
-    s.headers.update(build_headers(uid, channel, is_openid))
-    params = {"channel": channel}
-    if is_openid:
-        params["openid"] = uid
-    else:
-        params["terminalId"] = uid
+    s.headers.update({"User-Agent": UA})
+    id_key = "openid" if is_openid else "terminalId"
+    params = {id_key: uid, "channel": channel}
     resp = s.get(f"{BASE}/activity/act67/open/home",
                  params=params, timeout=TIMEOUT, allow_redirects=True)
-    return s, resp.status_code, s.cookies.get("JSESSIONID")
+    jsid = s.cookies.get("JSESSIONID")
+    if diag:
+        print(f"  [诊断] 主页 HTTP {resp.status_code}")
+        print(f"  [诊断] JSESSIONID={jsid}")
+        print(f"  [诊断] 响应 Set-Cookie: {resp.headers.get('Set-Cookie', 'none')}")
+    return s, jsid
 
 
-def api_get(session, path, uid, channel, is_openid, extra_params=None):
-    """统一 AJAX GET，复用 session 的 cookie"""
-    params = {"channel": channel}
-    if is_openid:
-        params["openid"] = uid
-    else:
-        params["terminalId"] = uid
+def ajax_get(session, path, uid, channel, is_openid, extra_params=None, diag=False, label=""):
+    """
+    模拟前端 $.getJSON：
+    - 不带 X-Requested-With
+    - Accept: application/json, text/javascript, */*; q=0.01
+    - 带 Referer
+    """
+    id_key = "openid" if is_openid else "terminalId"
+    params = {id_key: uid, "channel": channel}
     if extra_params:
         params.update(extra_params)
-    headers = build_headers(uid, channel, is_openid, ajax=True)
+    headers = {
+        "User-Agent": UA,
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Referer": build_referer(uid, channel, is_openid),
+    }
     resp = session.get(f"{BASE}{path}", params=params, headers=headers, timeout=TIMEOUT)
     try:
-        return resp.status_code, resp.json()
+        data = resp.json()
     except Exception:
-        return resp.status_code, {"_raw": resp.text[:300]}
+        data = {"_raw": resp.text[:500]}
+    if diag:
+        print(f"  [诊断][{label}] URL: {resp.url}")
+        print(f"  [诊断][{label}] 请求头: {dict(resp.request.headers)}")
+        print(f"  [诊断][{label}] 响应状态: {resp.status_code}")
+        print(f"  [诊断][{label}] 响应头: {dict(resp.headers)}")
+        print(f"  [诊断][{label}] 响应体: {resp.text[:500]}")
+    return resp.status_code, data
 
 
-def get_user_info(session, uid, channel, is_openid):
-    """前端流程第一步：建立用户会话绑定"""
-    sc, data = api_get(session, "/activity/data/userInfo", uid, channel, is_openid)
+def get_user_info(session, uid, channel, is_openid, diag=False):
+    sc, data = ajax_get(session, "/activity/data/userInfo", uid, channel, is_openid, diag=diag, label="userInfo")
     if sc == 200 and isinstance(data, dict) and "userInfo" in data:
         ui = data["userInfo"]
         return {
             "id": ui.get("id", ""),
             "nickName": ui.get("nickName", ""),
             "menbType": ui.get("menbType", ""),
-            "regTime": ui.get("regTime", ""),
         }
     return None
 
 
-def get_club_info(session, uid, channel, is_openid):
-    """前端流程第二步：获取会员信息与手机号"""
-    sc, data = api_get(session, "/activity/vip/book2/queryByBossAll",
-                       uid, channel, is_openid)
+def get_club_info(session, uid, channel, is_openid, diag=False):
+    sc, data = ajax_get(session, "/activity/vip/book2/queryByBossAll",
+                         uid, channel, is_openid, diag=diag, label="clubInfo")
     if sc == 200 and isinstance(data, dict) and data.get("retCode") == "0":
         club = data.get("data", {})
         vip_types = [name for flag, name in VIP_FLAGS.items()
@@ -131,14 +155,12 @@ def get_club_info(session, uid, channel, is_openid):
             "phone": data.get("phone", "未知"),
             "vip_types": vip_types if vip_types else ["非会员"],
             "is_vip": any(str(club.get(flag, 0)) == "1" for flag in VIP_FLAGS),
-            "raw": club,
         }
     return None
 
 
-def get_sign_status(session, uid, channel, is_openid):
-    """前端流程第三步：查询签到状态"""
-    sc, data = api_get(session, "/activity/act67/init", uid, channel, is_openid)
+def get_sign_status(session, uid, channel, is_openid, diag=False):
+    sc, data = ajax_get(session, "/activity/act67/init", uid, channel, is_openid, diag=diag, label="init")
     if sc == 200 and isinstance(data, dict) and data.get("statusCode") == 0:
         d = data.get("data", {})
         return {
@@ -149,23 +171,45 @@ def get_sign_status(session, uid, channel, is_openid):
     return None
 
 
-def do_sign(session, uid, channel, is_openid):
-    """执行签到，返回 (success, message, data)"""
-    sc, data = api_get(session, "/activity/newYear20/signed",
-                       uid, channel, is_openid,
-                       extra_params={"actId": "67"})
-    if sc != 200 or not isinstance(data, dict):
-        return False, f"HTTP {sc}", {}
+def do_sign(session, uid, channel, is_openid, diag=False):
+    """
+    执行签到，严格模拟前端：
+    - URL: /activity/newYear20/signed?actId=67 + auth参数(openid/terminalId)
+    - 不带 channel（前端 addLoginParmarToUrls 不注入 channel）
+    - GET 请求，纯 $.getJSON 风格
+    """
+    id_key = "openid" if is_openid else "terminalId"
+    params = {"actId": ACT_ID, id_key: uid}
+    headers = {
+        "User-Agent": UA,
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Referer": build_referer(uid, channel, is_openid),
+    }
+    resp = session.get(f"{BASE}/activity/newYear20/signed",
+                       params=params, headers=headers, timeout=TIMEOUT)
+    if diag:
+        print(f"  [诊断][signed] URL: {resp.url}")
+        print(f"  [诊断][signed] 请求头: {dict(resp.request.headers)}")
+        print(f"  [诊断][signed] 响应状态: {resp.status_code}")
+        print(f"  [诊断][signed] 响应头: {dict(resp.headers)}")
+        print(f"  [诊断][signed] 响应体: {resp.text[:500]}")
+
+    if resp.status_code != 200:
+        return False, f"HTTP {resp.status_code}", {}
+    try:
+        data = resp.json()
+    except Exception:
+        return False, f"非JSON响应: {resp.text[:200]}", {}
+
     code = data.get("statusCode")
     if code == 0:
         d = data.get("data", {})
         return True, "签到成功", d
-    # statusCode=1 且 desc 含"稍后"通常是已签到或限流
     desc = data.get("statusDesc", "未知错误")
     return False, desc, data.get("data", {})
 
 
-def process_one(url, index, total):
+def process_one(url, index, total, diag=False):
     uid, channel, is_openid = parse_identifier(url)
     id_type = "openid" if is_openid else "terminalId"
     tag = f"[{index + 1}/{total}]"
@@ -179,22 +223,21 @@ def process_one(url, index, total):
         return {"uid": uid, "error": "no identifier"}
 
     # 1. 建立会话
-    session, sc, jsid = create_session(uid, channel, is_openid)
+    session, jsid = create_session(uid, channel, is_openid, diag=diag)
     if not jsid:
-        print(f"  [警告] 未获取到 JSESSIONID，继续尝试")
+        print("  [警告] 未获取到 JSESSIONID，继续尝试")
     else:
-        print(f"  [会话] JSESSIONID={jsid}  (HTTP {sc})")
+        print(f"  [会话] JSESSIONID={jsid}")
 
     # 2. userInfo（前端必调，建立用户会话绑定）
-    user_info = get_user_info(session, uid, channel, is_openid)
+    user_info = get_user_info(session, uid, channel, is_openid, diag=diag)
     if user_info:
-        print(f"  [用户] ID={user_info['id']}  会员等级={user_info['menbType']}  "
-              f"注册时间={user_info['regTime']}")
+        print(f"  [用户] ID={user_info['id']}  会员等级={user_info['menbType']}")
     else:
-        print(f"  [用户] userInfo 获取失败（不影响签到，继续）")
+        print(f"  [用户] userInfo 获取失败")
 
     # 3. clubInfo（会员信息 + 手机号）
-    club = get_club_info(session, uid, channel, is_openid)
+    club = get_club_info(session, uid, channel, is_openid, diag=diag)
     if club:
         print(f"  [会员] 手机号={club['phone']}  类型={' / '.join(club['vip_types'])}")
     else:
@@ -202,7 +245,7 @@ def process_one(url, index, total):
         club = {"phone": "未知", "vip_types": ["未知"], "is_vip": True}
 
     # 4. 查询签到状态
-    status = get_sign_status(session, uid, channel, is_openid)
+    status = get_sign_status(session, uid, channel, is_openid, diag=diag)
     if not status:
         print(f"  [状态] init 接口返回异常，跳过")
         return {"uid": uid, "phone": club["phone"], "error": "init failed"}
@@ -220,14 +263,15 @@ def process_one(url, index, total):
         "sign_result": "already",
     }
 
-    # 5. 未签到则执行签到（含重试）
+    # 5. 未签到则执行签到（指数退避重试）
     if not status["signed"]:
         if not club["is_vip"]:
-            print(f"  [签到] 非会员，无法签到（前端逻辑：非会员点击签到会弹窗提示开通）")
+            print(f"  [签到] 非会员，无法签到")
             result["sign_result"] = "not_vip"
         else:
             for attempt in range(1, SIGN_RETRY + 2):
-                ok, msg, data = do_sign(session, uid, channel, is_openid)
+                ok, msg, data = do_sign(session, uid, channel, is_openid,
+                                         diag=(diag and attempt == 1))
                 if ok:
                     result["signed"] = True
                     result["sign_result"] = "success"
@@ -238,12 +282,18 @@ def process_one(url, index, total):
                     break
                 else:
                     print(f"  [签到] 第{attempt}次失败: {msg}")
-                    if attempt <= SIGN_RETRY:
-                        print(f"         {RETRY_DELAY}秒后重试...")
-                        time.sleep(RETRY_DELAY)
+                    # "请稍后再试" 可能是服务端限流，增加等待
+                    if "稍后" in msg and attempt <= SIGN_RETRY:
+                        wait = 5 * attempt  # 指数退避：5s, 10s
+                        print(f"         服务端限流提示，{wait}秒后重试...")
+                        time.sleep(wait)
+                    elif attempt <= SIGN_RETRY:
+                        time.sleep(3)
             else:
                 result["sign_result"] = "failed"
                 print(f"  [签到] 重试{SIGN_RETRY}次后仍失败")
+                print(f"  [提示] 该接口当前统一返回'请稍后再试~'，可能是活动已结束或服务端限制")
+                print(f"  [提示] 请在微信/和我信APP内手动签到验证服务端状态")
 
     # 6. 汇总
     sign_text = {"already": "已签到", "success": "签到成功",
@@ -255,17 +305,29 @@ def process_one(url, index, total):
 
 
 def main():
-    total = len(LINK_LIST)
+    parser = argparse.ArgumentParser(description="泰豪商城 act67 每日签到")
+    parser.add_argument("--diag", action="store_true", help="诊断模式：输出完整请求/响应细节")
+    parser.add_argument("--only", type=int, default=0, help="只处理第N个账号（1-based）")
+    args = parser.parse_args()
+
+    links = LINK_LIST
+    if args.only and 1 <= args.only <= len(links):
+        links = [links[args.only - 1]]
+        print(f"[仅处理第 {args.only} 个账号]")
+
+    total = len(links)
     if total == 0:
         print("链接列表为空")
         return
 
     print(f"泰豪商城 act67 签到  共 {total} 个账号  间隔 {INTERVAL}秒")
     print(f"开始时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    if args.diag:
+        print("*** 诊断模式已开启 ***")
 
     results = []
-    for i, url in enumerate(LINK_LIST):
-        r = process_one(url, i, total)
+    for i, url in enumerate(links):
+        r = process_one(url, i, total, diag=args.diag)
         results.append(r)
         if i < total - 1:
             time.sleep(INTERVAL)
