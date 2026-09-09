@@ -3,6 +3,7 @@ name: Auto Sign In
 on:
   schedule:
     - cron: '0 5 * * *'
+    - cron: '0 23 * * *'
   workflow_dispatch:
 
 jobs:
